@@ -58,6 +58,8 @@ pub struct AppSettings {
     pub safe_mode_enabled: bool,
     #[serde(default = "default_watchdog_interval")]
     pub watchdog_interval_sec: u64,
+    #[serde(default)]
+    pub auto_start_enabled: bool,
 }
 
 fn default_safe_mode() -> bool {
@@ -74,8 +76,31 @@ impl Default for AppSettings {
             custom_browser_path: None,
             safe_mode_enabled: true,
             watchdog_interval_sec: WATCHDOG_DEFAULT_INTERVAL_SECS,
+            auto_start_enabled: false,
         }
     }
+}
+
+pub const DEFAULT_BROWSER_ENV_ID: &str = "default";
+pub const DEFAULT_BROWSER_ENV_NAME: &str = "默认环境";
+
+/// 独立浏览器隔离环境项（每个环境映射到各自独立的 `--user-data-dir` 子目录）
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserProfileEnv {
+    pub id: String,
+    pub name: String,
+}
+
+fn default_browser_envs() -> Vec<BrowserProfileEnv> {
+    vec![BrowserProfileEnv {
+        id: DEFAULT_BROWSER_ENV_ID.to_string(),
+        name: DEFAULT_BROWSER_ENV_NAME.to_string(),
+    }]
+}
+
+fn default_active_browser_env_id() -> String {
+    DEFAULT_BROWSER_ENV_ID.to_string()
 }
 
 impl AppSettings {
@@ -132,6 +157,12 @@ pub struct AppConfigFile {
     pub settings: AppSettings,
     #[serde(default)]
     pub proxies: Vec<StoredProxy>,
+    /// 多账号独立浏览器环境列表
+    #[serde(default = "default_browser_envs")]
+    pub browser_envs: Vec<BrowserProfileEnv>,
+    /// 当前选中的独立浏览器环境 ID
+    #[serde(default = "default_active_browser_env_id")]
+    pub active_browser_env_id: String,
     /// 经 Windows DPAPI 加密存储的本机授权凭证（跨机器拷贝失效）
     #[serde(default)]
     pub license_encrypted: Option<String>,
@@ -148,6 +179,8 @@ impl Default for AppConfigFile {
             active_proxy_id: None,
             settings: AppSettings::default(),
             proxies: Vec::new(),
+            browser_envs: default_browser_envs(),
+            active_browser_env_id: default_active_browser_env_id(),
             license_encrypted: None,
         }
     }
@@ -630,6 +663,30 @@ impl ProxyStore {
         } else if !cfg.proxies.is_empty() {
             cfg.active_proxy_id = cfg.proxies.first().map(|p| p.id.clone());
         }
+
+        // 确保内置「默认环境」始终存在且位于列表首位
+        cfg.browser_envs.retain(|e| {
+            !e.id.trim().is_empty()
+                && !e.name.trim().is_empty()
+                && e.id != DEFAULT_BROWSER_ENV_ID
+                && e.id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        });
+        cfg.browser_envs.insert(
+            0,
+            BrowserProfileEnv {
+                id: DEFAULT_BROWSER_ENV_ID.to_string(),
+                name: DEFAULT_BROWSER_ENV_NAME.to_string(),
+            },
+        );
+        if !cfg
+            .browser_envs
+            .iter()
+            .any(|e| e.id == cfg.active_browser_env_id)
+        {
+            cfg.active_browser_env_id = DEFAULT_BROWSER_ENV_ID.to_string();
+        }
     }
 
     /// 将当前已存代理的用户名与解密密码同步注册到 Logger 脱敏引擎
@@ -704,9 +761,115 @@ impl ProxyStore {
         self.app_data_dir.join(PROFILES_DIR_NAME)
     }
 
-    /// 获取某套代理专属的浏览器隔离目录 `%APPDATA%\ClaudeSafeLite\profiles\<proxyId>`
+    /// 获取某套代理默认环境的浏览器隔离目录 `%APPDATA%\ClaudeSafeLite\profiles\<proxyId>`
     pub fn profile_dir_for(&self, proxy_id: &str) -> PathBuf {
-        self.profiles_dir().join(proxy_id)
+        self.profile_dir_for_env(proxy_id, DEFAULT_BROWSER_ENV_ID)
+    }
+
+    /// 获取某套代理在指定多账号隔离环境下的专属 `--user-data-dir` 目录
+    pub fn profile_dir_for_env(&self, proxy_id: &str, env_id: &str) -> PathBuf {
+        let trimmed_env = env_id.trim();
+        if trimmed_env.is_empty() || trimmed_env == DEFAULT_BROWSER_ENV_ID {
+            self.profiles_dir().join(proxy_id)
+        } else {
+            let safe_env: String = trimmed_env
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                .collect();
+            if safe_env.is_empty() {
+                self.profiles_dir().join(proxy_id)
+            } else {
+                self.profiles_dir()
+                    .join(format!("{}__env_{}", proxy_id, safe_env))
+            }
+        }
+    }
+
+    /// 获取全部独立浏览器环境与当前激活环境 ID
+    pub fn list_browser_envs(&self) -> (Vec<BrowserProfileEnv>, String) {
+        self.read_state(|s| {
+            (
+                s.config.browser_envs.clone(),
+                s.config.active_browser_env_id.clone(),
+            )
+        })
+    }
+
+    /// 新建一个独立浏览器环境并自动切换为当前激活环境
+    pub fn create_browser_env(
+        &self,
+        raw_name: &str,
+    ) -> Result<(Vec<BrowserProfileEnv>, String), StoreError> {
+        let name = raw_name.trim().to_string();
+        if name.is_empty() {
+            return Err(StoreError::Validation("环境名称不能为空（例如：环境2）".to_string()));
+        }
+        if name.chars().count() > 24 {
+            return Err(StoreError::Validation("环境名称不能超过 24 个字符".to_string()));
+        }
+
+        let (envs, active_id, snapshot) = self.write_state(
+            |s| -> Result<(Vec<BrowserProfileEnv>, String, AppConfigFile), StoreError> {
+                if s.config
+                    .browser_envs
+                    .iter()
+                    .any(|e| e.name.eq_ignore_ascii_case(&name))
+                {
+                    return Err(StoreError::Validation(format!(
+                        "环境名称「{}」已存在，请换一个名称",
+                        name
+                    )));
+                }
+                if s.config.browser_envs.len() >= 32 {
+                    return Err(StoreError::Validation(
+                        "独立浏览器环境数量已达上限 (32 个)".to_string(),
+                    ));
+                }
+
+                let short_hex = &Uuid::new_v4().simple().to_string()[..8];
+                let new_id = format!("env_{}", short_hex);
+                s.config.browser_envs.push(BrowserProfileEnv {
+                    id: new_id.clone(),
+                    name,
+                });
+                s.config.active_browser_env_id = new_id.clone();
+
+                Ok((
+                    s.config.browser_envs.clone(),
+                    new_id,
+                    s.config.clone(),
+                ))
+            },
+        )?;
+
+        self.persist_atomic(&snapshot)?;
+        Ok((envs, active_id))
+    }
+
+    /// 切换当前选中的独立浏览器环境
+    pub fn set_active_browser_env(
+        &self,
+        env_id: &str,
+    ) -> Result<(Vec<BrowserProfileEnv>, String), StoreError> {
+        let trimmed = env_id.trim();
+        let (envs, active_id, snapshot) = self.write_state(
+            |s| -> Result<(Vec<BrowserProfileEnv>, String, AppConfigFile), StoreError> {
+                if !s.config.browser_envs.iter().any(|e| e.id == trimmed) {
+                    return Err(StoreError::Validation(
+                        "未找到指定的独立浏览器环境".to_string(),
+                    ));
+                }
+                s.config.active_browser_env_id = trimmed.to_string();
+                Ok((
+                    s.config.browser_envs.clone(),
+                    s.config.active_browser_env_id.clone(),
+                    s.config.clone(),
+                ))
+            },
+        )?;
+
+        self.persist_atomic(&snapshot)?;
+        Ok((envs, active_id))
     }
 
     /// 消费「是否从备份自动恢复」标志
@@ -1034,6 +1197,16 @@ impl ProxyStore {
         clear_all_proxies: bool,
         restore_default_settings: bool,
     ) -> Result<(), StoreError> {
+        self.reset_store_ext(clear_all_proxies, restore_default_settings, false)
+    }
+
+    /// 扩展环境重置（支持在清理全部浏览器配置目录时同步重置多环境列表回默认环境）
+    pub fn reset_store_ext(
+        &self,
+        clear_all_proxies: bool,
+        restore_default_settings: bool,
+        reset_browser_envs: bool,
+    ) -> Result<(), StoreError> {
         let snapshot = self.write_state(|s| {
             if clear_all_proxies {
                 s.config.proxies.clear();
@@ -1041,6 +1214,10 @@ impl ProxyStore {
             }
             if restore_default_settings {
                 s.config.settings = AppSettings::default();
+            }
+            if reset_browser_envs {
+                s.config.browser_envs = default_browser_envs();
+                s.config.active_browser_env_id = default_active_browser_env_id();
             }
             s.config.clone()
         });

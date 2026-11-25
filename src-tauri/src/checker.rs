@@ -237,12 +237,14 @@ impl Default for CheckEndpointsConfig {
 /// Watchdog 后台快速巡检单次结果
 #[derive(Debug, Clone)]
 pub enum WatchdogProbeOutcome {
-    /// 出口 IP 与 DNS 均正常且与基线一致
+    /// 出口 IP、DNS 与 Claude 可访问性均正常
     Healthy { current_ip: String },
     /// 明确检测到泄露（出口 IP 偏离代理基线 / DNS 落入本地直连）—— 须 0 延迟立即熔断！
     ExplicitLeak { reason: String, detail: String },
-    /// 网络超时或上游不可达 —— 须 3 秒内复测 1 次防误报，连续 2 次确认后熔断
+    /// 网络超时或上游代理连接断开 —— 须 3 秒内复测 1 次防误报，连续 2 次确认后熔断并发送系统通知
     TransientOrDisconnected { detail: String },
+    /// 代理连通且无泄露，但检测到 Claude 站点不可访问（如 403/429 或目标超时）—— 复测确认后发送系统通知提醒用户
+    ClaudeUnreachable { detail: String },
 }
 
 /// 五项检测协调器（管理防抖取消与最近一次报告缓存）
@@ -554,6 +556,19 @@ impl Checker {
                 reason: "检测到 IP/DNS 泄露，已强制关闭安全浏览器".to_string(),
                 detail: dns_item.summary,
             };
+        }
+
+        // 3. 复测 Claude 站点可访问性（若不可访问则触发巡检异常系统通知）
+        if let Ok(no_redir_client) =
+            build_proxied_http_client(forwarder_port, self.endpoints.item_timeout, false)
+        {
+            let claude_item =
+                run_step_04_claude_access(&no_redir_client, &self.endpoints, &self.logger).await;
+            if claude_item.status == LightStatus::Red {
+                return WatchdogProbeOutcome::ClaudeUnreachable {
+                    detail: claude_item.summary,
+                };
+            }
         }
 
         WatchdogProbeOutcome::Healthy { current_ip }

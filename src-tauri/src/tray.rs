@@ -49,7 +49,7 @@ impl TrayManager {
 
     /// 在应用 setup 阶段挂载系统托盘与菜单事件
     pub fn init(&self, app: &AppHandle) -> Result<(), String> {
-        let show_item = MenuItem::with_id(app, MENU_ID_SHOW_MAIN, "显示主窗口", true, None::<&str>)
+        let show_item = MenuItem::with_id(app, MENU_ID_SHOW_MAIN, "显示主界面", true, None::<&str>)
             .map_err(|e| e.to_string())?;
         let close_browser_item = MenuItem::with_id(
             app,
@@ -59,8 +59,14 @@ impl TrayManager {
             None::<&str>,
         )
         .map_err(|e| e.to_string())?;
-        let quit_item = MenuItem::with_id(app, MENU_ID_QUIT_APP, "退出程序", true, None::<&str>)
-            .map_err(|e| e.to_string())?;
+        let quit_item = MenuItem::with_id(
+            app,
+            MENU_ID_QUIT_APP,
+            "彻底退出（关闭转发器）",
+            true,
+            None::<&str>,
+        )
+        .map_err(|e| e.to_string())?;
 
         let menu = Menu::with_items(app, &[&show_item, &close_browser_item, &quit_item])
             .map_err(|e| e.to_string())?;
@@ -159,9 +165,43 @@ pub fn focus_main_window(app: &AppHandle) {
     }
 }
 
-/// 发送 Windows 原生系统通知气泡（配合安全熔断告警）
+/// 发送跨平台系统原生告警通知（Windows WinRT Toast 自动注册 AUMID + macOS Notification Center 兜底）
 pub fn send_windows_notification(app: &AppHandle, title: &str, body: &str) {
-    let _ = app.notification().builder().title(title).body(body).show();
+    if app
+        .notification()
+        .builder()
+        .title(title)
+        .body(body)
+        .show()
+        .is_ok()
+    {
+        return;
+    }
+
+    #[cfg(windows)]
+    {
+        crate::autostart::ensure_windows_notification_aumid(
+            "com.claudesafelite.app",
+            "Claude安全客户端",
+        );
+        let _ = app.notification().builder().title(title).body(body).show();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let esc_title = title.replace('\\', "\\\\").replace('"', "\\\"");
+        let esc_body = body.replace('\\', "\\\\").replace('"', "\\\"");
+        let script = format!(
+            "display notification \"{}\" with title \"{}\"",
+            esc_body, esc_title
+        );
+        let _ = std::process::Command::new("/usr/bin/osascript")
+            .args(["-e", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+    }
 }
 
 /// 纯内存生成 32x32 抗锯齿双层圆环状态图标（零外部图片文件 IO 依赖）

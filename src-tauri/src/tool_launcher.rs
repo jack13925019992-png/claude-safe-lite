@@ -694,9 +694,16 @@ pub fn execute_reset_environment(
         cleaned_items.push("全部历史日志");
     }
 
-    if options.clear_proxies || options.restore_default_settings {
+    if options.clean_browser_profiles
+        || options.clear_proxies
+        || options.restore_default_settings
+    {
         proxy_store
-            .reset_store(options.clear_proxies, options.restore_default_settings)
+            .reset_store_ext(
+                options.clear_proxies,
+                options.restore_default_settings,
+                options.clean_browser_profiles,
+            )
             .map_err(|e| {
                 HumanizedError::new(
                     "RESET_STORE_FAILED",
@@ -709,6 +716,7 @@ pub fn execute_reset_environment(
             cleaned_items.push("全部代理配置");
         }
         if options.restore_default_settings {
+            let _ = crate::autostart::apply_system_autostart(false);
             cleaned_items.push("应用默认设置");
         }
     }

@@ -53,6 +53,17 @@ export interface AppSettings {
   customBrowserPath: string | null;
   safeModeEnabled: boolean;
   watchdogIntervalSec: number;
+  autoStartEnabled: boolean;
+}
+
+export interface BrowserProfileEnv {
+  id: string;
+  name: string;
+}
+
+export interface BrowserEnvStateResponse {
+  browserEnvs: BrowserProfileEnv[];
+  activeBrowserEnvId: string;
 }
 
 export interface CheckItemResult {
@@ -133,8 +144,11 @@ export interface AppFullStateResponse {
   proxies: ProxyView[];
   activeProxyId: string | null;
   settings: AppSettings;
+  browserEnvs: BrowserProfileEnv[];
+  activeBrowserEnvId: string;
   browserState: BrowserLifecycleState;
   runningProxyId: string | null;
+  runningBrowserEnvId: string | null;
   forwarderState: ForwarderStateSnapshot;
   circuitBreaker: CircuitBreakerSnapshot;
   latestReport: CheckReport | null;

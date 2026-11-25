@@ -10,6 +10,9 @@ use uuid::Uuid;
 
 use claude_safe_lite_lib::constants::{CONFIG_BACKUP_FILE_NAME, CONFIG_FILE_NAME};
 use claude_safe_lite_lib::crypto::{dpapi_decrypt, dpapi_encrypt, CryptoError};
+use claude_safe_lite_lib::diagnostics::{
+    mask_license_code, mask_sensitive_host, scrub_text_for_diagnostics,
+};
 use claude_safe_lite_lib::logger::{mask_username, LogKind, Logger};
 use claude_safe_lite_lib::proxy_store::{
     parse_proxy_text, AppSettings, ProxyStore, SaveProxyInput,
@@ -243,12 +246,42 @@ fn test_proxy_store_crud_atomic_bak_recovery_and_zero_plaintext() {
             custom_browser_path: None,
             safe_mode_enabled: true,
             watchdog_interval_sec: 60,
+            auto_start_enabled: true,
         })
         .unwrap();
+
+    // 验证多账号独立浏览器环境创建与物理目录隔离
+    let (envs_after, active_env_id) = store.create_browser_env("环境2").unwrap();
+    assert_eq!(envs_after.len(), 2);
+    assert_ne!(active_env_id, "default");
+    let default_dir = store.profile_dir_for_env(&copied.id, "default");
+    let env2_dir = store.profile_dir_for_env(&copied.id, &active_env_id);
+    assert_ne!(default_dir, env2_dir, "不同账号环境必须映射到独立隔离目录");
+
+    // 验证脱敏诊断工具对代理地址、出口 IP 与完整授权码的 *** 脱敏
+    assert_eq!(mask_sensitive_host("198.51.100.25"), "198.51.***.***");
+    assert_eq!(mask_sensitive_host("us01.residential.io"), "us***.io");
+    assert_eq!(
+        mask_license_code("CL-ABCD-EFGH-IJKL-MNOP"),
+        "CL-ABCD-***-***-MNOP"
+    );
+    let scrubbed = scrub_text_for_diagnostics(
+        "节点 us01.residential.io (203.0.113.88) 授权 CL-1111-2222-3333-4444 本地 127.0.0.1:12223",
+        &["us01.residential.io".to_string()],
+        &["CL-1111-2222-3333-4444".to_string()],
+    );
+    assert!(!scrubbed.contains("us01.residential.io"));
+    assert!(!scrubbed.contains("203.0.113.88"));
+    assert!(!scrubbed.contains("CL-1111-2222-3333-4444"));
+    assert!(scrubbed.contains("127.0.0.1:12223"));
+
+    // 再写一次配置确保 .bak 包含最新状态，然后破坏主文件测试恢复
+    store.set_active_browser_env(&active_env_id).unwrap();
     fs::write(dir.join(CONFIG_FILE_NAME), "<<< CORRUPTED FILE >>>").unwrap();
 
     let reloaded = ProxyStore::load_or_init(dir.clone(), logger).unwrap();
     assert!(reloaded.take_recovered_notice());
+    assert!(reloaded.get_settings().auto_start_enabled);
     let (proxies, active) = reloaded.list_proxies();
     assert_eq!(proxies.len(), 1);
     assert_eq!(active.as_deref(), Some(copied.id.as_str()));

@@ -1,51 +1,69 @@
-# Claude Safe Lite v2（Windows & macOS 双平台客户端）
+# Claude Safe Lite（Windows & macOS 双平台安全客户端）
 
-**Claude安全客户端（Claude Safe Lite v2）** 是一款支持 **Windows 10/11 (x64)** 与 **macOS (Apple Silicon M1~M4 / Intel 通用)** 的独立环境隔离与 SOCKS5 安全代理链路守护工具。
-
----
-
-## 一、核心安全特性
-
-1. **云端一机一码与 Ed25519 验签保护**：首次输入授权码自动绑定当前电脑主板硬件识别码（Windows `MachineGuid` / macOS `IOPlatformUUID`），云端响应经 Ed25519 公钥验签与本机硬件级加密落盘，转发第二台电脑立即拦截。
-2. **本地回环转发器（Forwarder）**：严格绑定 `127.0.0.1:0`，统一承接带用户名/密码（RFC 1929）的静态住宅 SOCKS5 代理，域名强制 `ATYP=0x03` 远端透传解析，零本地 DNS 泄露。
-3. **五项环境预检仪表盘**：自动检测「01 代理连接 → 02 出口 IP 国家 → 03 IP 风险评分 → 04 Claude 可访问 → 05 DNS 泄露」，关键阻断项未通过时禁止直连裸奔。
-4. **安全浏览器隔离沙箱与掉线秒级熔断（Kill Switch）**：
-   - 自动按 **Brave → Chrome** 顺序探测（每套代理拥有独立 Profile 目录，Cookie 互不串号），注入禁用 QUIC / WebRTC 非代理 UDP / 本地 DNS 规则；
-   - 后台双引擎实时巡检，一旦检测到出口 IP 突变、DNS 泄露或代理掉线，毫秒级切断本地转发器并通过系统级沙箱（Windows `Job Object` / macOS 独立进程组 `PGID`）精准终止安全浏览器进程树，**绝不误杀用户自己打开的日常浏览器窗口**。
-5. **扩展工具代理一键注入**：支持一键拉起带安全代理环境的 `Claude Code (CLI)` 独立终端与 `Claude` 官方桌面客户端。
+**Claude安全客户端（Claude Safe Lite）** 是一款支持 **Windows 10/11 (x64)** 与 **macOS (Apple Silicon M1~M4 / Intel 通用)** 的独立环境隔离、防风控对齐与 SOCKS5 安全代理链路守护桌面工具。
 
 ---
 
-## 二、GitHub Releases 安装包下载选型
+## 一、客户端下载与版本选型指引
 
-打开本仓库右侧 **[Releases](https://github.com/jack13925019992-png/claude-safe-lite/releases)** 页面下载对应系统安装包：
+请直接前往本仓库右侧或点击 **[👉 最新版 Releases 下载页面](https://github.com/jack13925019992-png/claude-safe-lite/releases/latest)** 下载对应操作系统的安装包：
 
-| 操作系统 | 推荐下载文件 | 适用说明 |
+| 操作系统 | 下载文件名称 | 适用人群与使用说明 |
 | :--- | :--- | :--- |
-| **Windows 10 / 11 (64位)** | `Claude-Safe-Lite_v*_Windows_x64_Setup.exe` | **推荐普通客户**：一键安装向导，自动创建桌面与开始菜单快捷方式 |
-| **Windows 10 / 11 (免安装)** | `Claude-Safe-Lite_v*_Windows_x64_Portable.exe` | **单文件绿色版**：无需安装，放入任意文件夹双击直接运行 |
-| **macOS (M 芯片 & Intel 通用)** | `Claude-Safe-Lite_v*_macOS_Universal.dmg` | **双架构二合一**：同时原生兼容 Apple Silicon (M1/M2/M3/M4) 与 Intel Mac |
+| **Windows 10 / 11 (推荐安装版)** | `Claude-Safe-Lite_v*_Windows_x64_Setup.exe` | **推荐大多数用户**：双击按向导一键安装，自动创建桌面与开始菜单快捷方式 |
+| **Windows 10 / 11 (免安装绿色版)** | `Claude-Safe-Lite_v*_Windows_x64_Portable.exe` | **单文件便携版**：无需安装、零外部 DLL 依赖，放入任意文件夹双击直接运行 |
+| **Windows 10 / 11 (MSI 安装包)** | `Claude-Safe-Lite_v*_Windows_x64_Installer.msi` | Windows 标准 MSI 部署安装包 |
+| **macOS (M 芯片 & Intel 通用)** | `Claude-Safe-Lite_v*_macOS_Universal.dmg` | **双架构二合一**：同时原生支持 Apple Silicon (M1/M2/M3/M4) 与 Intel Mac |
 
 ---
 
-## 三、发给客户的「首次安装与解除拦截指引」（可直接复制发送）
+## 二、核心安全特性与最新功能更新
 
-### 💻 发给 Windows 客户的 1-2-3 安装说明
+1. **纯净隔离浏览器与消除顶部警告横幅**：
+   - 自动按 **Brave → Chrome** 顺序探测启动安全浏览器，强制注入 `--disable-quic`、禁用非代理 WebRTC UDP 与 `--host-resolver-rules` 禁本地 DNS 解析规则；
+   - 内置 `--test-type` 启动参数，自动屏蔽浏览器顶部“您使用的是不受支持的命令行标记”警告横幅，保持界面纯净。
+2. **出口 IP 与时区 / 语言自动对齐（防风控增强）**：
+   - 启动安全隔离浏览器时，根据「02 出口IP国家」最新检测到的国家/地区代码（如 `JP` 对应 `Asia/Tokyo`、`US` 对应 `America/New_York`、`SG` 对应 `Asia/Singapore`、`GB` 对应 `Europe/London`，未知地区默认 `UTC`）自动为浏览器子进程注入匹配的 `TZ` 时区环境变量与 `--lang=en-US` 语言参数，避免本地中文/东八区特征与海外代理 IP 冲突。
+3. **多账号独立浏览器环境切换**：
+   - 在「安全隔离浏览器」卡片右上角提供紧凑环境选择器（默认 `默认环境`，支持点击 `+ 新建独立环境` 自定义命名创建，如 `环境2`）；
+   - 每个环境自动映射各自独立的 `--user-data-dir` 物理子目录，实现多个 Claude 账号之间的 Cookie 与本地缓存完全物理隔离、互不串号。
+4. **系统托盘后台驻留与巡检异常原生通知**：
+   - 点击主窗口右上角关闭按钮（`X`）时程序不退出，自动隐藏驻留至系统托盘（macOS 为顶部菜单栏），并在后台持续保持本地回环转发器（默认监听 `127.0.0.1:12223`）稳定运行；
+   - 托盘右键菜单支持「显示主界面」「关闭安全浏览器」和「彻底退出（关闭转发器）」；
+   - 后台默认每 45 秒执行安全巡检，检测到**代理连接断开**或 **Claude 不可访问**时自动推送系统原生通知提醒用户；一旦检测到 IP/DNS 泄露或确认掉线，毫秒级切断本地转发器并精准终止安全浏览器进程树（**绝不误杀用户自己打开的日常浏览器窗口**）。
+5. **免管理员弹窗开机自动启动**：
+   - 右上角「设置」弹窗新增「开机自动启动」开关并持久化保存；
+   - Windows 端写入当前用户启动项（`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`），不触发 UAC 管理员弹窗；macOS 端写入用户级 `LaunchAgents`，免管理员密码弹窗。
+6. **授权剩余天数展示与一键 `***` 脱敏诊断报告**：
+   - 云端一机一码与 Ed25519 数字签名验签保护，顶部用户授权胶囊直观显示非永久授权的剩余有效天数（如 `剩余 6 天`）；
+   - 「日志」弹窗新增「复制脱敏诊断信息」按钮，一键将软件版本、操作系统版本、五项安全检测状态及最近 30 条运行日志复制到剪贴板，并在复制前自动对节点密码、敏感代理地址、出口 IP 和完整授权码进行 `***` 脱敏处理。
+7. **五项环境预检与扩展工具代理一键注入**：
+   - 自动检测「01 代理连接 → 02 出口 IP 国家 → 03 IP 风险评分 → 04 Claude 可访问 → 05 DNS 泄露」；
+   - 支持一键拉起自动注入安全代理环境的 `Claude Code (CLI)` 独立终端与 `Claude` 官方桌面客户端。
+
+---
+
+## 三、快速安装与首次使用指引（Windows & macOS）
+
+### 💻 Windows 用户安装与使用说明
 
 ```text
 💻 Claude安全客户端（Windows 版）安装与启动说明
 
-1. 下载安装包（Setup.exe 安装版或 Portable.exe 免安装版），双击运行。
+1. 前往 Releases 下载安装包（推荐下载 Setup.exe 安装版，或下载 Portable.exe 免安装绿色版直接双击运行）。
 
-2. 首次打开解除微软蓝屏安全提示（仅第一次运行需要）：
+2. 首次打开解除微软安全提示（仅第一次运行需要）：
    若弹出蓝色窗口提示“Windows 已保护你的电脑（Microsoft Defender SmartScreen 已阻止启动未识别的应用）”：
    ① 点击弹窗文字下方的【更多信息】（带下划线的小字）；
    ② 点击窗口右下角新出现的【仍要运行】按钮，即可正常安装并进入软件。
 
-3. 打开软件后，依次填写您的【姓名 + 手机号 + 授权码】以及 SOCKS5 代理信息，点击【校验并进入客户端】，待五盏安全检测灯通过后点击【启动安全浏览器访问 Claude】即可。
+3. 登录与使用：
+   ① 依次填写您的【姓名 + 手机号 + 授权码】以及 SOCKS5 代理信息（支持一键粘贴自动拆分），点击【校验并进入客户端】；
+   ② 待五盏安全检测灯通过后，可在浏览器卡片右上角选择或新建独立账号环境，点击【启动安全浏览器访问 Claude】即可；
+   ③ 日常点击右上角 × 会自动最小化到右下角系统托盘并保持 127.0.0.1:12223 本地转发后台运行，右键托盘图标可随时呼出主界面或彻底退出。
 ```
 
-### 🍎 发给 Mac 客户的 1-2-3 安装说明
+### 🍎 macOS 用户安装与使用说明（M 系列芯片与 Intel 通用）
 
 ```text
 🍎 Claude安全客户端（Mac 版 · M芯片与Intel通用）安装与启动说明
@@ -60,25 +78,26 @@
    （注：如遇个别系统直接提示“软件已损坏，无法打开”，请打开电脑自带的【终端 / Terminal】，复制粘贴以下一整行命令按回车，输入开机密码后回车即可一键永久解除：
    sudo xattr -rd com.apple.quarantine "/Applications/Claude Safe Lite.app" ）
 
-3. 进入软件后，填写您的【姓名 + 手机号 + 授权码】以及 SOCKS5 代理信息，点击【校验并进入客户端】，待检测通过后点击【启动安全浏览器访问 Claude】即可。
+3. 登录与使用：
+   进入软件后填写【姓名 + 手机号 + 授权码】及 SOCKS5 代理信息，点击【校验并进入客户端】（首次运行如系统询问通知权限，建议点击“允许”以便接收后台巡检异常提醒），待检测通过后点击【启动安全浏览器访问 Claude】即可。
 ```
 
 ---
 
 ## 四、开发者维护与云端自动打包说明
 
-本项目已配置 GitHub Actions 双端自动构建流水线（[`.github/workflows/release.yml`](.github/workflows/release.yml)）。为避免日常普通提交与版本标签重复触发、节省构建配额，**仅在推送 `v*` 版本标签（或网页端手动点击 `Run workflow`）时执行完整双端打包并自动发布至 GitHub Releases**：
+本项目已配置 GitHub Actions 双端自动构建流水线（[`.github/workflows/release.yml`](.github/workflows/release.yml)），支持在推送 `v*` 版本标签或网页端手动触发 `Run workflow` 时自动编译 Windows + macOS 安装包并发布/更新至 GitHub Releases：
 
-1. **平时保存并推送代码到主分支（不消耗打包配额）**：
+1. **推送代码更新到主分支**：
    ```powershell
    git add .
-   git commit -m "update: 优化客户端体验"
+   git commit -m "feat: 更新客户端功能与说明文档"
    git push origin main
    ```
-2. **需要打包发布新版本时（打上 `v*` 标签推送，自动编译 Windows + macOS 并发布 Release）**：
+2. **打标签触发云端双端自动打包发布新版本**：
    ```powershell
    git tag v2.0.1
    git push origin v2.0.1
    ```
 
-更多详细发版步骤与架构文档请参阅 [`docs/`](docs/) 目录。
+更多架构设计与运维说明请参阅 [`docs/`](docs/) 目录。

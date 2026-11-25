@@ -18,7 +18,8 @@ use claude_safe_lite_lib::browser_launcher::Win32ProcessJob;
 #[cfg(unix)]
 use claude_safe_lite_lib::browser_launcher::UnixProcessGroup;
 use claude_safe_lite_lib::browser_launcher::{
-    build_hardened_browser_args, detect_browser, BrowserKind, BrowserLauncher,
+    build_hardened_browser_args, detect_browser, map_country_to_iana_timezone, BrowserKind,
+    BrowserLauncher,
 };
 use claude_safe_lite_lib::checker::{CheckEndpointsConfig, Checker};
 use claude_safe_lite_lib::forwarder::{ForwarderManager, LeaseOwner};
@@ -255,7 +256,16 @@ fn test_browser_detection_priority_and_hardened_cli_args() {
     assert!(args.contains(&"--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_string()));
     assert!(args.contains(&"--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1".to_string()));
     assert!(args.contains(&"--test-type".to_string()));
+    assert!(args.contains(&"--lang=en-US".to_string()));
     assert!(args.contains(&"https://claude.ai".to_string()));
+
+    // 4. 校验出口国家代码到 IANA 时区的自动对齐映射
+    assert_eq!(map_country_to_iana_timezone(Some("JP")), "Asia/Tokyo");
+    assert_eq!(map_country_to_iana_timezone(Some("us")), "America/New_York");
+    assert_eq!(map_country_to_iana_timezone(Some("SG")), "Asia/Singapore");
+    assert_eq!(map_country_to_iana_timezone(Some("GB")), "Europe/London");
+    assert_eq!(map_country_to_iana_timezone(Some("ZZ")), "UTC");
+    assert_eq!(map_country_to_iana_timezone(None), "UTC");
 
     let _ = fs::remove_dir_all(&dir);
 }

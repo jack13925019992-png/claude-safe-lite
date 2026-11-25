@@ -624,6 +624,20 @@ export function LogViewerModal({ onClose }: { onClose: () => void }) {
     }
   };
 
+  const handleCopyDiagnostics = async () => {
+    setError(null);
+    try {
+      const reportText = await api.getDiagnosticReport();
+      await navigator.clipboard.writeText(reportText);
+      setNotice(
+        "✓ 已复制脱敏诊断信息到剪贴板（节点密码、敏感代理地址与完整授权码均已 *** 脱敏）",
+      );
+      setTimeout(() => setNotice(null), 3500);
+    } catch (err) {
+      setError(normalizeError(err));
+    }
+  };
+
   const handleExport = async () => {
     setError(null);
     try {
@@ -682,6 +696,13 @@ export function LogViewerModal({ onClose }: { onClose: () => void }) {
             </div>
 
             <div className="btn-row">
+              <button
+                type="button"
+                className="btn btn-sm btn-primary"
+                onClick={() => void handleCopyDiagnostics()}
+              >
+                复制脱敏诊断信息
+              </button>
               <button
                 type="button"
                 className="btn btn-sm btn-ghost"
@@ -953,6 +974,7 @@ export function SettingsModal({
   onSaved: (s: AppSettings) => void;
 }) {
   const [safeMode, setSafeMode] = useState(settings.safeModeEnabled);
+  const [autoStart, setAutoStart] = useState(settings.autoStartEnabled);
   const [intervalSec, setIntervalSec] = useState(settings.watchdogIntervalSec);
   const [browserPath, setBrowserPath] = useState(
     settings.customBrowserPath ?? "",
@@ -966,6 +988,7 @@ export function SettingsModal({
     try {
       const updated = await api.updateSettings({
         safeModeEnabled: safeMode,
+        autoStartEnabled: autoStart,
         watchdogIntervalSec: intervalSec,
         customBrowserPath: browserPath.trim() ? browserPath.trim() : null,
       });
@@ -1001,6 +1024,23 @@ export function SettingsModal({
                 onChange={(e) => setSafeMode(e.target.checked)}
               />
               <span>启用安全模式（IP/DNS 泄露与掉线自动熔断保护，强烈推荐）</span>
+            </label>
+          </div>
+
+          <div className="form-field" style={{ marginTop: 6 }}>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={autoStart}
+                onChange={(e) => setAutoStart(e.target.checked)}
+              />
+              <span>
+                开机自动启动（
+                {IS_MAC
+                  ? "写入当前用户 LaunchAgents 启动项，免管理员密码"
+                  : "写入当前用户 Windows 启动项，不触发管理员弹窗"}
+                ）
+              </span>
             </label>
           </div>
 
@@ -1243,6 +1283,102 @@ export function WatchdogAlertModal({
               }}
             >
               立即重新检测解锁
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// 7. 新建多账号独立浏览器环境弹窗
+// ============================================================================
+
+export function CreateBrowserEnvModal({
+  suggestedName,
+  onClose,
+  onCreated,
+}: {
+  suggestedName: string;
+  onClose: () => void;
+  onCreated: (
+    envs: { id: string; name: string }[],
+    activeId: string,
+    createdName: string,
+  ) => void;
+}) {
+  const [envName, setEnvName] = useState(suggestedName);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<HumanizedError | null>(null);
+
+  const handleSubmit = async () => {
+    const trimmed = envName.trim();
+    if (!trimmed) {
+      setError({
+        code: "EMPTY_ENV_NAME",
+        userMessage: "请输入独立环境名称（例如：环境2）",
+        technicalDetail: "",
+      });
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await api.createBrowserEnv(trimmed);
+      onCreated(res.browserEnvs, res.activeBrowserEnvId, trimmed);
+      onClose();
+    } catch (err) {
+      setError(normalizeError(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop">
+      <div className="modal-card" style={{ maxWidth: 420 }}>
+        <div className="modal-header">
+          <h3>新建独立浏览器环境</h3>
+          <button type="button" className="btn-icon-close" onClick={onClose}>
+            ×
+          </button>
+        </div>
+        <div className="modal-body">
+          {error && (
+            <ErrorBanner error={error} onDismiss={() => setError(null)} />
+          )}
+          <div className="form-field">
+            <label className="form-label">环境名称</label>
+            <input
+              type="text"
+              className="form-input"
+              placeholder="例如：环境2 / 工作账号"
+              value={envName}
+              maxLength={24}
+              autoFocus
+              onChange={(e) => setEnvName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !saving) {
+                  void handleSubmit();
+                }
+              }}
+            />
+            <span className="muted-hint" style={{ marginTop: 4 }}>
+              每个环境自动映射独立的浏览器数据目录，多 Claude 账号 Cookie 与本地缓存完全物理隔离。
+            </span>
+          </div>
+          <div className="modal-footer">
+            <button type="button" className="btn btn-ghost" onClick={onClose}>
+              取消
+            </button>
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={saving || !envName.trim()}
+              onClick={() => void handleSubmit()}
+            >
+              {saving ? "创建中..." : "创建并切换"}
             </button>
           </div>
         </div>

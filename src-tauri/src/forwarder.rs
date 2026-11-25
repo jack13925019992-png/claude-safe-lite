@@ -25,8 +25,8 @@ use tokio::sync::{Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::constants::{
-    FORWARDER_FAIL_STREAK_THRESHOLD, FORWARDER_MAX_CONNECTIONS, TUNNEL_IDLE_TIMEOUT_SECS,
-    UPSTREAM_CONNECT_TIMEOUT_SECS,
+    FORWARDER_FAIL_STREAK_THRESHOLD, FORWARDER_MAX_CONNECTIONS, FORWARDER_PREFERRED_PORT,
+    TUNNEL_IDLE_TIMEOUT_SECS, UPSTREAM_CONNECT_TIMEOUT_SECS,
 };
 use crate::human_errors::HumanizedError;
 use crate::logger::{LogKind, Logger};
@@ -44,6 +44,7 @@ pub enum LeaseOwner {
     ClaudeCodeCli,
     ClaudeDesktop,
     CheckOrWatchdog,
+    BackgroundDaemon,
 }
 
 impl LeaseOwner {
@@ -53,6 +54,7 @@ impl LeaseOwner {
             LeaseOwner::ClaudeCodeCli => "Claude Code (CLI)",
             LeaseOwner::ClaudeDesktop => "Claude 桌面端",
             LeaseOwner::CheckOrWatchdog => "检测/巡检任务",
+            LeaseOwner::BackgroundDaemon => "系统托盘后台转发",
         }
     }
 }
@@ -177,9 +179,40 @@ impl RunningForwarderCore {
         failure_alert_notify: Option<Arc<Notify>>,
         state_change_hook: Option<Arc<dyn Fn() + Send + Sync>>,
     ) -> Result<Arc<Self>, HumanizedError> {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .map_err(|e| HumanizedError::forwarder_bind_failed(&e.to_string(), Some(&logger)))?;
+        Self::spawn_with_preferred_port(
+            upstream,
+            0,
+            options,
+            logger,
+            failure_alert_notify,
+            state_change_hook,
+        )
+        .await
+    }
+
+    /// 启动严格绑定在 `127.0.0.1` 的转发器实例（优先绑定 `preferred_port`，被占用时自动平滑回退随机端口）
+    pub async fn spawn_with_preferred_port(
+        upstream: ResolvedUpstreamProxy,
+        preferred_port: u16,
+        options: ForwarderOptions,
+        logger: Arc<Logger>,
+        failure_alert_notify: Option<Arc<Notify>>,
+        state_change_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Result<Arc<Self>, HumanizedError> {
+        let listener = if preferred_port != 0 {
+            match TcpListener::bind((Ipv4Addr::LOCALHOST, preferred_port)).await {
+                Ok(l) => l,
+                Err(_) => TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                    .await
+                    .map_err(|e| {
+                        HumanizedError::forwarder_bind_failed(&e.to_string(), Some(&logger))
+                    })?,
+            }
+        } else {
+            TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                .await
+                .map_err(|e| HumanizedError::forwarder_bind_failed(&e.to_string(), Some(&logger)))?
+        };
 
         let listen_addr = listener
             .local_addr()
@@ -967,8 +1000,9 @@ impl ForwarderManager {
             }
         });
 
-        let new_core = RunningForwarderCore::spawn(
+        let new_core = RunningForwarderCore::spawn_with_preferred_port(
             upstream,
+            FORWARDER_PREFERRED_PORT,
             self.options.clone(),
             self.logger.clone(),
             Some(self.upstream_suspect_notify.clone()),

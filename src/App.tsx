@@ -3,6 +3,7 @@ import { api, events, normalizeError } from "./api";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { LicenseGateView } from "./components/LicenseGateView";
 import {
+  CreateBrowserEnvModal,
   LogViewerModal,
   ProxyManagerModal,
   ResetEnvModal,
@@ -14,6 +15,7 @@ import {
 import type {
   AppSettings,
   BrowserLifecycleState,
+  BrowserProfileEnv,
   CheckItemResult,
   CheckReport,
   CircuitBreakerSnapshot,
@@ -117,7 +119,13 @@ export default function App() {
     customBrowserPath: null,
     safeModeEnabled: true,
     watchdogIntervalSec: 45,
+    autoStartEnabled: false,
   });
+  const [browserEnvs, setBrowserEnvs] = useState<BrowserProfileEnv[]>([
+    { id: "default", name: "默认环境" },
+  ]);
+  const [activeBrowserEnvId, setActiveBrowserEnvId] =
+    useState<string>("default");
   const [browserState, setBrowserState] =
     useState<BrowserLifecycleState>("idle");
   const [runningProxyId, setRunningProxyId] = useState<string | null>(null);
@@ -151,6 +159,7 @@ export default function App() {
   const [showLogModal, setShowLogModal] = useState(false);
   const [showResetModal, setShowResetModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [showCreateEnvModal, setShowCreateEnvModal] = useState(false);
   const [showCloseProtectModal, setShowCloseProtectModal] = useState(false);
   const [activeWatchdogAlert, setActiveWatchdogAlert] =
     useState<WatchdogAlertPayload | null>(null);
@@ -193,6 +202,8 @@ export default function App() {
     setProxies(st.proxies);
     setActiveProxyId(st.activeProxyId);
     setSettings(st.settings);
+    setBrowserEnvs(st.browserEnvs);
+    setActiveBrowserEnvId(st.activeBrowserEnvId);
     setBrowserState(st.browserState);
     setRunningProxyId(st.runningProxyId);
     setForwarderState(st.forwarderState);
@@ -347,6 +358,22 @@ export default function App() {
     }
   };
 
+  const handleSwitchBrowserEnv = async (envId: string) => {
+    if (!envId || envId === activeBrowserEnvId) return;
+    setTopError(null);
+    try {
+      const res = await api.setActiveBrowserEnv(envId);
+      setBrowserEnvs(res.browserEnvs);
+      setActiveBrowserEnvId(res.activeBrowserEnvId);
+      const envName =
+        res.browserEnvs.find((e) => e.id === res.activeBrowserEnvId)?.name ??
+        "默认环境";
+      showToast(`已切换至独立浏览器环境：${envName}`);
+    } catch (err) {
+      setTopError(normalizeError(err));
+    }
+  };
+
   const executeLaunchBrowser = async (
     force: boolean,
     allowWarnings?: boolean,
@@ -362,8 +389,11 @@ export default function App() {
             : outcome.browser.kind === "chrome"
               ? "Chrome"
               : "自定义浏览器";
+        const curEnvName =
+          browserEnvs.find((e) => e.id === activeBrowserEnvId)?.name ??
+          "默认环境";
         showToast(
-          `已安全启动 ${bName}（本地转发端口 127.0.0.1:${outcome.forwarderPort}）`,
+          `已安全启动 ${bName} · ${curEnvName}（本地转发端口 127.0.0.1:${outcome.forwarderPort}）`,
         );
         await refreshFullState();
       } else if (outcome.outcome === "needsWarningConfirm") {
@@ -471,7 +501,8 @@ export default function App() {
       disabled: false,
       isStopAction: false,
       label: "启动安全浏览器访问 Claude",
-      subHint: "自动探测 Brave → Chrome · 独立配置目录 · 禁用 QUIC / WebRTC / 本地 DNS",
+      subHint:
+        "自动探测 Brave → Chrome · 出口时区/语言自动对齐 · 禁用 QUIC / WebRTC / 本地 DNS",
     };
   }, [
     browserState,
@@ -612,11 +643,29 @@ export default function App() {
           <div className="nav-icon-btns">
             <div
               className="license-user-pill"
-              title={`授权用户：${license.holderName ?? ""} (${license.holderPhone ?? ""})`}
+              title={`授权用户：${license.holderName ?? ""} (${license.holderPhone ?? ""})${
+                license.isPermanent
+                  ? " · 永久有效"
+                  : ` · 到期日：${license.expiresAt ?? "-"}`
+              }`}
             >
               <span>🔑 {license.holderName}</span>
-              <span>
-                · {license.isPermanent ? "永久" : `至 ${license.expiresAt}`}
+              <span
+                className={
+                  !license.isPermanent &&
+                  license.daysRemaining !== null &&
+                  license.daysRemaining <= 3
+                    ? "license-days-soon"
+                    : undefined
+                }
+              >
+                ·{" "}
+                {license.isPermanent
+                  ? "永久"
+                  : license.daysRemaining !== null &&
+                      license.daysRemaining !== undefined
+                    ? `剩余 ${Math.max(0, license.daysRemaining)} 天`
+                    : `至 ${license.expiresAt}`}
               </span>
               <button
                 type="button"
@@ -834,7 +883,30 @@ export default function App() {
         <section className="launch-grid">
           <div className="panel-card launch-primary-card">
             <div className="launch-head">
-              <h3>安全隔离浏览器（推荐主入口）</h3>
+              <div className="launch-head-top">
+                <h3>安全隔离浏览器（推荐主入口）</h3>
+                <select
+                  className="env-select"
+                  value={activeBrowserEnvId}
+                  disabled={browserState === "running" || launchingBrowser}
+                  title="切换不同 Claude 账号专属的浏览器隔离目录（Cookie 与本地缓存完全物理隔离）"
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === "__create_new__") {
+                      setShowCreateEnvModal(true);
+                    } else {
+                      void handleSwitchBrowserEnv(val);
+                    }
+                  }}
+                >
+                  {browserEnvs.map((env) => (
+                    <option key={env.id} value={env.id}>
+                      {env.name}
+                    </option>
+                  ))}
+                  <option value="__create_new__">+ 新建独立环境</option>
+                </select>
+              </div>
               <span className="muted-hint">{browserBtnConfig.subHint}</span>
             </div>
 
@@ -991,6 +1063,18 @@ export default function App() {
           onSaved={(newSettings) => {
             setSettings(newSettings);
             showToast("安全与浏览器设置已保存生效");
+          }}
+        />
+      )}
+
+      {showCreateEnvModal && (
+        <CreateBrowserEnvModal
+          suggestedName={`环境${browserEnvs.length + 1}`}
+          onClose={() => setShowCreateEnvModal(false)}
+          onCreated={(envs, activeId, createdName) => {
+            setBrowserEnvs(envs);
+            setActiveBrowserEnvId(activeId);
+            showToast(`已创建并切换至独立环境：${createdName}`);
           }}
         />
       )}

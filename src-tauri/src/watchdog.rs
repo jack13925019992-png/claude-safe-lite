@@ -75,6 +75,7 @@ pub struct Watchdog {
     state: Mutex<WatchdogInternalState>,
     state_listener: Mutex<Option<Arc<dyn Fn(CircuitBreakerSnapshot) + Send + Sync>>>,
     alert_listener: Mutex<Option<Arc<dyn Fn(WatchdogAlertPayload) + Send + Sync>>>,
+    warning_listener: Mutex<Option<Arc<dyn Fn(String, String) + Send + Sync>>>,
 }
 
 impl Watchdog {
@@ -116,6 +117,7 @@ impl Watchdog {
             }),
             state_listener: Mutex::new(None),
             alert_listener: Mutex::new(None),
+            warning_listener: Mutex::new(None),
         })
     }
 
@@ -133,6 +135,15 @@ impl Watchdog {
         F: Fn(WatchdogAlertPayload) + Send + Sync + 'static,
     {
         if let Ok(mut g) = self.alert_listener.lock() {
+            *g = Some(Arc::new(cb));
+        }
+    }
+
+    pub fn set_warning_listener<F>(&self, cb: F)
+    where
+        F: Fn(String, String) + Send + Sync + 'static,
+    {
+        if let Ok(mut g) = self.warning_listener.lock() {
             *g = Some(Arc::new(cb));
         }
     }
@@ -197,6 +208,7 @@ impl Watchdog {
         let suspect_notify = self.forwarder_mgr.upstream_suspect_notifier();
 
         tokio::spawn(async move {
+            let mut claude_warned = false;
             loop {
                 let woke_by_suspect = tokio::select! {
                     biased;
@@ -233,12 +245,90 @@ impl Watchdog {
 
                 match first_outcome {
                     WatchdogProbeOutcome::Healthy { current_ip } => {
+                        claude_warned = false;
                         wd.mark_check_healthy(&current_ip);
                     }
                     WatchdogProbeOutcome::ExplicitLeak { detail, .. } => {
                         // 明确检测到 IP 偏离基线或 DNS 泄露：零容忍、0 延迟立即熔断！
                         wd.execute_atomic_trip(TripKind::IpOrDnsLeak, &detail);
                         break;
+                    }
+                    WatchdogProbeOutcome::ClaudeUnreachable { detail: first_err } => {
+                        wd.logger.warn(
+                            LogKind::Check,
+                            format!(
+                                "安全巡检首次探测到 Claude 访问异常 ({})，将在 {:?} 后复测确认",
+                                first_err, wd.retry_delay
+                            ),
+                        );
+
+                        tokio::select! {
+                            biased;
+                            _ = cancel_token.cancelled() => break,
+                            _ = tokio::time::sleep(wd.retry_delay) => {}
+                        }
+
+                        if cancel_token.is_cancelled() {
+                            break;
+                        }
+
+                        let second_outcome = wd
+                            .checker
+                            .run_watchdog_probe(
+                                forwarder_port,
+                                &baseline_ip,
+                                baseline_country.as_deref(),
+                            )
+                            .await;
+
+                        if cancel_token.is_cancelled() {
+                            break;
+                        }
+
+                        match second_outcome {
+                            WatchdogProbeOutcome::Healthy { current_ip } => {
+                                claude_warned = false;
+                                wd.mark_check_healthy(&current_ip);
+                            }
+                            WatchdogProbeOutcome::ExplicitLeak { detail, .. } => {
+                                wd.execute_atomic_trip(TripKind::IpOrDnsLeak, &detail);
+                                break;
+                            }
+                            WatchdogProbeOutcome::TransientOrDisconnected { detail: second_err } => {
+                                let combined = format!(
+                                    "巡检复测确认代理连接已断开 (首次: {}; 复测: {})",
+                                    first_err, second_err
+                                );
+                                wd.execute_atomic_trip(TripKind::ProxyDisconnected, &combined);
+                                break;
+                            }
+                            WatchdogProbeOutcome::ClaudeUnreachable { detail: second_err } => {
+                                wd.logger.warn(
+                                    LogKind::Check,
+                                    format!(
+                                        "安全巡检连续 2 次确认 Claude 不可访问 ({})",
+                                        second_err
+                                    ),
+                                );
+                                if !claude_warned {
+                                    claude_warned = true;
+                                    let warn_cb = wd
+                                        .warning_listener
+                                        .lock()
+                                        .unwrap_or_else(|p| p.into_inner())
+                                        .clone();
+                                    if let Some(cb) = warn_cb {
+                                        cb(
+                                            "Claude安全客户端 · 巡检异常提醒".to_string(),
+                                            format!(
+                                                "后台安全巡检检测到 Claude 当前不可访问（{}），请检查代理节点状态或切换节点。",
+                                                wd.logger.sanitize(&second_err)
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                        }
                     }
                     WatchdogProbeOutcome::TransientOrDisconnected { detail: first_err } => {
                         // 防瞬时网络抖动：3 秒内自动复测 1 次
@@ -275,6 +365,7 @@ impl Watchdog {
 
                         match second_outcome {
                             WatchdogProbeOutcome::Healthy { current_ip } => {
+                                claude_warned = false;
                                 wd.logger.info(
                                     LogKind::Check,
                                     format!(
@@ -287,6 +378,25 @@ impl Watchdog {
                             WatchdogProbeOutcome::ExplicitLeak { detail, .. } => {
                                 wd.execute_atomic_trip(TripKind::IpOrDnsLeak, &detail);
                                 break;
+                            }
+                            WatchdogProbeOutcome::ClaudeUnreachable { detail: second_err } => {
+                                if !claude_warned {
+                                    claude_warned = true;
+                                    let warn_cb = wd
+                                        .warning_listener
+                                        .lock()
+                                        .unwrap_or_else(|p| p.into_inner())
+                                        .clone();
+                                    if let Some(cb) = warn_cb {
+                                        cb(
+                                            "Claude安全客户端 · 巡检异常提醒".to_string(),
+                                            format!(
+                                                "后台安全巡检检测到 Claude 当前不可访问（{}），请检查代理节点状态或切换节点。",
+                                                wd.logger.sanitize(&second_err)
+                                            ),
+                                        );
+                                    }
+                                }
                             }
                             WatchdogProbeOutcome::TransientOrDisconnected { detail: second_err } => {
                                 let combined = format!(

@@ -12,7 +12,9 @@ use crate::forwarder::{ForwarderStateSnapshot, LeaseOwner};
 use crate::human_errors::HumanizedError;
 use crate::license::LicenseStatusView;
 use crate::logger::{LogKind, LogLevel};
-use crate::proxy_store::{AppSettings, ParsedProxyDraft, ProxyView, SaveProxyInput, StoreError};
+use crate::proxy_store::{
+    AppSettings, BrowserProfileEnv, ParsedProxyDraft, ProxyView, SaveProxyInput, StoreError,
+};
 use crate::tool_launcher::{
     execute_reset_environment, launch_claude_code_cli, launch_claude_desktop_app,
     open_external_https_url, show_save_log_dialog, ResetEnvOptions, ResetSummary,
@@ -36,12 +38,22 @@ pub struct AppFullStateResponse {
     pub proxies: Vec<ProxyView>,
     pub active_proxy_id: Option<String>,
     pub settings: AppSettings,
+    pub browser_envs: Vec<BrowserProfileEnv>,
+    pub active_browser_env_id: String,
     pub browser_state: BrowserLifecycleState,
     pub running_proxy_id: Option<String>,
+    pub running_browser_env_id: Option<String>,
     pub forwarder_state: ForwarderStateSnapshot,
     pub circuit_breaker: CircuitBreakerSnapshot,
     pub latest_report: Option<CheckReport>,
     pub recovered_from_backup: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserEnvStateResponse {
+    pub browser_envs: Vec<BrowserProfileEnv>,
+    pub active_browser_env_id: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -129,6 +141,7 @@ pub fn get_app_state(ctx: State<'_, AppContext>) -> AppFullStateResponse {
     let license = ctx.proxy_store.get_license_status();
     let (proxies, active_proxy_id) = ctx.proxy_store.list_proxies();
     let settings = ctx.proxy_store.get_settings();
+    let (browser_envs, active_browser_env_id) = ctx.proxy_store.list_browser_envs();
     let browser_state = if ctx.browser_launcher.is_running() {
         BrowserLifecycleState::Running
     } else {
@@ -140,8 +153,11 @@ pub fn get_app_state(ctx: State<'_, AppContext>) -> AppFullStateResponse {
         proxies,
         active_proxy_id,
         settings,
+        browser_envs,
+        active_browser_env_id,
         browser_state,
         running_proxy_id: ctx.browser_launcher.running_proxy_id(),
+        running_browser_env_id: ctx.browser_launcher.running_env_id(),
         forwarder_state: ctx.forwarder_mgr.snapshot(),
         circuit_breaker: ctx.watchdog.snapshot(),
         latest_report: ctx.checker.latest_report(),
@@ -209,6 +225,8 @@ pub async fn activate_license(
         .save_verified_license(&verified_payload)
         .map_err(|e| map_store_err(e, &ctx))?;
 
+    ctx.sync_background_forwarder().await;
+
     ctx.logger.info(
         LogKind::App,
         format!(
@@ -226,11 +244,12 @@ pub fn deactivate_license(
     app: AppHandle,
     ctx: State<'_, AppContext>,
 ) -> Result<LicenseStatusView, HumanizedError> {
+    ctx.drop_background_forwarder();
+    ctx.watchdog.stop_monitoring();
     if ctx.browser_launcher.is_running() {
-        ctx.watchdog.stop_monitoring();
         ctx.browser_launcher.force_kill("切换软件授权，自动关闭安全浏览器");
-        ctx.refresh_tray_visual(&app);
     }
+    ctx.refresh_tray_visual(&app);
 
     let view = ctx
         .proxy_store
@@ -246,16 +265,39 @@ pub fn update_settings(
     app: AppHandle,
     ctx: State<'_, AppContext>,
 ) -> Result<AppSettings, HumanizedError> {
+    let prev = ctx.proxy_store.get_settings();
+    if prev.auto_start_enabled != settings.auto_start_enabled {
+        crate::autostart::apply_system_autostart(settings.auto_start_enabled).map_err(|err| {
+            HumanizedError::new(
+                "AUTOSTART_ERROR",
+                "设置开机自动启动失败 → 请检查安全软件是否拦截了当前用户启动项写入",
+                err,
+                Some(&ctx.logger),
+            )
+        })?;
+        ctx.logger.info(
+            LogKind::App,
+            format!(
+                "已{}开机自动启动",
+                if settings.auto_start_enabled {
+                    "开启"
+                } else {
+                    "关闭"
+                }
+            ),
+        );
+    }
+
     let saved = ctx
         .proxy_store
         .update_settings(settings)
         .map_err(|e| map_store_err(e, &ctx))?;
 
-    // 若安全浏览器正在运行，实时同步更新 Watchdog 开关与周期
-    if ctx.browser_launcher.is_running() {
-        if saved.safe_mode_enabled {
-            if let ForwarderStateSnapshot::Running { port, .. } = ctx.forwarder_mgr.snapshot() {
-                if let Some(rep) = ctx.checker.latest_report() {
+    // 实时同步更新 Watchdog 开关与周期（无论安全浏览器运行中还是后台转发器运行中）
+    if saved.safe_mode_enabled {
+        if let ForwarderStateSnapshot::Running { port, .. } = ctx.forwarder_mgr.snapshot() {
+            if let Some(rep) = ctx.checker.latest_report() {
+                if rep.critical_all_green() {
                     if let Some(ip) = rep.exit_ip {
                         ctx.watchdog.start_monitoring(
                             port,
@@ -266,9 +308,9 @@ pub fn update_settings(
                     }
                 }
             }
-        } else {
-            ctx.watchdog.stop_monitoring();
         }
+    } else {
+        ctx.watchdog.stop_monitoring();
     }
 
     ctx.refresh_tray_visual(&app);
@@ -296,7 +338,7 @@ pub fn list_proxies(ctx: State<'_, AppContext>) -> ProxyListResponse {
 }
 
 #[tauri::command]
-pub fn save_proxy(
+pub async fn save_proxy(
     input: SaveProxyInput,
     ctx: State<'_, AppContext>,
 ) -> Result<ProxyView, HumanizedError> {
@@ -314,10 +356,18 @@ pub fn save_proxy(
         }
     }
 
+    let (_, prev_active) = ctx.proxy_store.list_proxies();
+    let editing_active = input.id.is_some() && input.id == prev_active;
+    if editing_active {
+        ctx.watchdog.stop_monitoring();
+        ctx.drop_background_forwarder();
+    }
+
     let view = ctx
         .proxy_store
         .save_proxy(input)
         .map_err(|e| map_store_err(e, &ctx))?;
+    ctx.sync_background_forwarder().await;
     ctx.logger
         .info(LogKind::App, format!("已保存代理配置: {}", view.name));
     Ok(view)
@@ -335,7 +385,7 @@ pub fn duplicate_proxy(id: String, ctx: State<'_, AppContext>) -> Result<ProxyVi
 }
 
 #[tauri::command]
-pub fn delete_proxy(
+pub async fn delete_proxy(
     id: String,
     ctx: State<'_, AppContext>,
 ) -> Result<Option<String>, HumanizedError> {
@@ -348,17 +398,24 @@ pub fn delete_proxy(
         ));
     }
 
+    let (_, prev_active) = ctx.proxy_store.list_proxies();
+    if prev_active.as_deref() == Some(id.as_str()) {
+        ctx.watchdog.stop_monitoring();
+        ctx.drop_background_forwarder();
+    }
+
     let next_active = ctx
         .proxy_store
         .delete_proxy(&id)
         .map_err(|e| map_store_err(e, &ctx))?;
+    ctx.sync_background_forwarder().await;
     ctx.logger
         .info(LogKind::App, format!("已删除代理配置 ID={}", id));
     Ok(next_active)
 }
 
 #[tauri::command]
-pub fn set_active_proxy(
+pub async fn set_active_proxy(
     id: String,
     ctx: State<'_, AppContext>,
 ) -> Result<ProxyView, HumanizedError> {
@@ -373,10 +430,14 @@ pub fn set_active_proxy(
         }
     }
 
+    ctx.watchdog.stop_monitoring();
+    ctx.drop_background_forwarder();
+
     let view = ctx
         .proxy_store
         .set_active_proxy(&id)
         .map_err(|e| map_store_err(e, &ctx))?;
+    ctx.sync_background_forwarder().await;
     ctx.logger
         .info(LogKind::App, format!("已切换当前激活代理为: {}", view.name));
     Ok(view)
@@ -435,6 +496,23 @@ pub async fn run_checks(
     // 熔断态下：若关键项（01、02、04）全绿且无明确泄露，自动解除熔断锁定！
     if ctx.watchdog.try_unlock_after_recheck(&report) {
         ctx.refresh_tray_visual(&app);
+    }
+
+    ctx.sync_background_forwarder().await;
+
+    // 检测关键项全绿且开启安全模式时，自动挂载后台定期安全巡检（即使隐藏到系统托盘未开内置浏览器也能实时告警）
+    let settings = ctx.proxy_store.get_settings();
+    if settings.safe_mode_enabled && !ctx.watchdog.is_locked() && report.critical_all_green() {
+        if let ForwarderStateSnapshot::Running { port, .. } = ctx.forwarder_mgr.snapshot() {
+            if let Some(ref ip) = report.exit_ip {
+                ctx.watchdog.start_monitoring(
+                    port,
+                    ip.clone(),
+                    report.country_code.clone(),
+                    Duration::from_secs(settings.watchdog_interval_sec),
+                );
+            }
+        }
     }
 
     Ok(report)
@@ -574,19 +652,31 @@ pub async fn launch_browser(
         }
     }
 
-    // 申请共享 Forwarder 租约并启动安全浏览器
+    // 申请共享 Forwarder 租约并启动安全浏览器（注入匹配出口国家的 TZ 时区、--lang=en-US 与独立多账号环境目录）
+    let (envs, active_env_id) = ctx.proxy_store.list_browser_envs();
+    let active_env_name = envs
+        .iter()
+        .find(|e| e.id == active_env_id)
+        .map(|e| e.name.clone())
+        .unwrap_or_else(|| "默认环境".to_string());
+
     let lease = ctx
         .forwarder_mgr
         .acquire_lease(upstream.clone(), LeaseOwner::SafeBrowser)
         .await?;
     let forwarder_port = lease.port();
-    let profile_dir = ctx.proxy_store.profile_dir_for(&upstream.id);
+    let profile_dir = ctx
+        .proxy_store
+        .profile_dir_for_env(&upstream.id, &active_env_id);
 
-    let detected = ctx.browser_launcher.launch_isolated(
+    let detected = ctx.browser_launcher.launch_isolated_with_env(
         upstream.id.clone(),
         upstream.name.clone(),
+        active_env_id,
+        active_env_name,
         profile_dir,
         settings.custom_browser_path.as_deref(),
+        baseline_country.as_deref(),
         lease,
     )?;
 
@@ -629,12 +719,78 @@ pub async fn launch_browser(
 
 #[tauri::command]
 pub fn close_browser(app: AppHandle, ctx: State<'_, AppContext>) -> bool {
-    ctx.watchdog.stop_monitoring();
     let killed = ctx
         .browser_launcher
         .force_kill("用户手动点击关闭安全浏览器");
+    if !ctx.proxy_store.get_settings().safe_mode_enabled
+        || !matches!(
+            ctx.forwarder_mgr.snapshot(),
+            ForwarderStateSnapshot::Running { .. }
+        )
+    {
+        ctx.watchdog.stop_monitoring();
+    }
     ctx.refresh_tray_visual(&app);
     killed
+}
+
+#[tauri::command]
+pub fn create_browser_env(
+    name: String,
+    ctx: State<'_, AppContext>,
+) -> Result<BrowserEnvStateResponse, HumanizedError> {
+    if ctx.browser_launcher.is_running() {
+        return Err(HumanizedError::new(
+            "BROWSER_RUNNING_ENV_BLOCKED",
+            "安全浏览器正在运行中 → 请先关闭当前安全浏览器后再新建并切换独立环境",
+            "Cannot switch browser profile env while active session is running",
+            Some(&ctx.logger),
+        ));
+    }
+
+    let (browser_envs, active_browser_env_id) = ctx
+        .proxy_store
+        .create_browser_env(&name)
+        .map_err(|e| map_store_err(e, &ctx))?;
+    ctx.logger.info(
+        LogKind::App,
+        format!("已新建并切换至独立浏览器环境: {}", name.trim()),
+    );
+    Ok(BrowserEnvStateResponse {
+        browser_envs,
+        active_browser_env_id,
+    })
+}
+
+#[tauri::command]
+pub fn set_active_browser_env(
+    env_id: String,
+    ctx: State<'_, AppContext>,
+) -> Result<BrowserEnvStateResponse, HumanizedError> {
+    if let Some(running_env) = ctx.browser_launcher.running_env_id() {
+        if running_env != env_id {
+            return Err(HumanizedError::new(
+                "BROWSER_RUNNING_ENV_BLOCKED",
+                "安全浏览器正在运行中 → 请先关闭当前安全浏览器后再切换其他独立账号环境",
+                format!("Running env={} cannot switch to {}", running_env, env_id),
+                Some(&ctx.logger),
+            ));
+        }
+    }
+
+    let (browser_envs, active_browser_env_id) = ctx
+        .proxy_store
+        .set_active_browser_env(&env_id)
+        .map_err(|e| map_store_err(e, &ctx))?;
+    Ok(BrowserEnvStateResponse {
+        browser_envs,
+        active_browser_env_id,
+    })
+}
+
+#[tauri::command]
+pub fn get_diagnostic_report(ctx: State<'_, AppContext>) -> String {
+    crate::diagnostics::build_sanitized_diagnostic_report(&ctx)
 }
 
 #[tauri::command]
@@ -766,6 +922,10 @@ pub fn reset_env(
     options: ResetEnvOptions,
     ctx: State<'_, AppContext>,
 ) -> Result<ResetSummary, HumanizedError> {
+    if options.clear_proxies {
+        ctx.watchdog.stop_monitoring();
+        ctx.drop_background_forwarder();
+    }
     execute_reset_environment(&options, &ctx.browser_launcher, &ctx.proxy_store, &ctx.logger)
 }
 

@@ -26,6 +26,7 @@ pub const LOG_DEFAULT_TAIL_LINES: usize = 500;
 
 /// 本地转发器（Forwarder）参数
 pub const FORWARDER_BIND_HOST: &str = "127.0.0.1";
+pub const FORWARDER_PREFERRED_PORT: u16 = 12223;
 pub const FORWARDER_MAX_CONNECTIONS: usize = 512;
 pub const UPSTREAM_CONNECT_TIMEOUT_SECS: u64 = 10;
 pub const TUNNEL_IDLE_TIMEOUT_SECS: u64 = 300; // 5 分钟

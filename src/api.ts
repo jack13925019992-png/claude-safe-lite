@@ -4,6 +4,7 @@ import type {
   ActivateLicenseInput,
   AppFullStateResponse,
   AppSettings,
+  BrowserEnvStateResponse,
   BrowserLifecycleState,
   CheckItemResult,
   CheckReport,
@@ -111,6 +112,14 @@ export const api = {
     }),
 
   closeBrowser: () => invoke<boolean>("close_browser"),
+
+  createBrowserEnv: (name: string) =>
+    invoke<BrowserEnvStateResponse>("create_browser_env", { name }),
+
+  setActiveBrowserEnv: (envId: string) =>
+    invoke<BrowserEnvStateResponse>("set_active_browser_env", { envId }),
+
+  getDiagnosticReport: () => invoke<string>("get_diagnostic_report"),
 
   launchClaudeCode: (workdir?: string | null) =>
     invoke<string>("launch_claude_code", {

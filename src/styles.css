@@ -486,6 +486,43 @@ body,
   margin-bottom: 4px;
 }
 
+.launch-head-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+
+.launch-head-top h3 {
+  margin-bottom: 0;
+}
+
+.env-select {
+  background: var(--bg-card-elevated);
+  color: var(--text-main);
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 12px;
+  min-width: 112px;
+  max-width: 158px;
+  outline: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: border-color 0.15s ease;
+}
+
+.env-select:hover:not(:disabled),
+.env-select:focus {
+  border-color: var(--accent-blue);
+}
+
+.env-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .btn-hero {
   width: 100%;
   padding: 14px 18px;
@@ -1351,4 +1388,9 @@ body,
   cursor: pointer;
   text-decoration: underline;
   margin-left: 2px;
+}
+
+.license-days-soon {
+  color: #e3b341;
+  font-weight: 600;
 }

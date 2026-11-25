@@ -731,7 +731,55 @@ pub fn is_profile_dir_locked(profile_dir: &Path) -> bool {
     }
 }
 
-/// 构造安全浏览器全部防泄露命令行参数（返回 `Vec<OsString>` 供 `Command::args` 逐项安全传入）
+/// 根据出口 IP 所在国家/地区二字码映射匹配的 IANA 时区标识符（未知地区默认返回 `"UTC"`）
+pub fn map_country_to_iana_timezone(country_code: Option<&str>) -> &'static str {
+    let Some(raw) = country_code else {
+        return "UTC";
+    };
+    match raw.trim().to_ascii_uppercase().as_str() {
+        "JP" => "Asia/Tokyo",
+        "US" => "America/New_York",
+        "SG" => "Asia/Singapore",
+        "GB" | "UK" => "Europe/London",
+        "KR" => "Asia/Seoul",
+        "TW" => "Asia/Taipei",
+        "DE" => "Europe/Berlin",
+        "FR" => "Europe/Paris",
+        "NL" => "Europe/Amsterdam",
+        "CA" => "America/Toronto",
+        "AU" => "Australia/Sydney",
+        "CH" => "Europe/Zurich",
+        "SE" => "Europe/Stockholm",
+        "IE" => "Europe/Dublin",
+        "IN" => "Asia/Kolkata",
+        "BR" => "America/Sao_Paulo",
+        "IT" => "Europe/Rome",
+        "ES" => "Europe/Madrid",
+        "PL" => "Europe/Warsaw",
+        "FI" => "Europe/Helsinki",
+        "NO" => "Europe/Oslo",
+        "DK" => "Europe/Copenhagen",
+        "AT" => "Europe/Vienna",
+        "BE" => "Europe/Brussels",
+        "PT" => "Europe/Lisbon",
+        "NZ" => "Pacific/Auckland",
+        "MY" => "Asia/Kuala_Lumpur",
+        "TH" => "Asia/Bangkok",
+        "VN" => "Asia/Ho_Chi_Minh",
+        "PH" => "Asia/Manila",
+        "ID" => "Asia/Jakarta",
+        "AE" => "Asia/Dubai",
+        "IL" => "Asia/Jerusalem",
+        "TR" => "Europe/Istanbul",
+        "MX" => "America/Mexico_City",
+        "AR" => "America/Argentina/Buenos_Aires",
+        "CL" => "America/Santiago",
+        "ZA" => "Africa/Johannesburg",
+        _ => "UTC",
+    }
+}
+
+/// 构造安全浏览器全部防泄露与防风控命令行参数（返回 `Vec<OsString>` 供 `Command::args` 逐项安全传入）
 pub fn build_hardened_browser_args(profile_dir: &Path, forwarder_port: u16) -> Vec<OsString> {
     let mut user_data_arg = OsString::from("--user-data-dir=");
     user_data_arg.push(profile_dir.as_os_str());
@@ -745,6 +793,7 @@ pub fn build_hardened_browser_args(profile_dir: &Path, forwarder_port: u16) -> V
         OsString::from("--force-webrtc-ip-handling-policy=disable_non_proxied_udp"),
         OsString::from("--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"),
         OsString::from("--test-type"),
+        OsString::from("--lang=en-US"),
         OsString::from(CLAUDE_WEB_URL),
     ]
 }
@@ -757,6 +806,7 @@ struct ActiveBrowserSession {
     session_id: u64,
     proxy_id: String,
     proxy_name: String,
+    env_id: String,
     browser: DetectedBrowser,
     profile_dir: PathBuf,
     sandbox: PlatformSandbox,
@@ -836,7 +886,15 @@ impl BrowserLauncher {
             .map(|s| s.browser.clone())
     }
 
-    /// 启动隔离安全浏览器并纳入系统级进程沙箱实时存活监控
+    pub fn running_env_id(&self) -> Option<String> {
+        self.active
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|s| s.env_id.clone())
+    }
+
+    /// 启动隔离安全浏览器（默认环境与默认时区入口，兼容自动化测试调用）
     pub fn launch_isolated(
         self: &Arc<Self>,
         proxy_id: String,
@@ -845,11 +903,36 @@ impl BrowserLauncher {
         custom_browser_path: Option<&str>,
         forwarder_lease: ForwarderLease,
     ) -> Result<DetectedBrowser, HumanizedError> {
+        self.launch_isolated_with_env(
+            proxy_id,
+            proxy_name,
+            "default".to_string(),
+            "默认环境".to_string(),
+            profile_dir,
+            custom_browser_path,
+            None,
+            forwarder_lease,
+        )
+    }
+
+    /// 启动带多账号独立环境与出口时区/语言自动对齐的安全隔离浏览器
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_isolated_with_env(
+        self: &Arc<Self>,
+        proxy_id: String,
+        proxy_name: String,
+        env_id: String,
+        env_name: String,
+        profile_dir: PathBuf,
+        custom_browser_path: Option<&str>,
+        exit_country_code: Option<&str>,
+        forwarder_lease: ForwarderLease,
+    ) -> Result<DetectedBrowser, HumanizedError> {
         // 1. 防重复启动拦截
         {
             let guard = self.active.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(ref existing) = *guard {
-                if existing.proxy_id == proxy_id {
+                if existing.proxy_id == proxy_id && existing.env_id == env_id {
                     return Err(HumanizedError::profile_in_use(&proxy_name));
                 }
                 return Err(HumanizedError::new(
@@ -881,11 +964,15 @@ impl BrowserLauncher {
         let detected = detect_browser(custom_browser_path, Some(&self.logger))?;
         self.emit_state(BrowserLifecycleState::Launching);
 
-        // 3. 在系统级隔离沙箱（Win32 Job Object / macOS Process Group）中启动浏览器
+        // 3. 在系统级隔离沙箱（Win32 Job Object / macOS Process Group）中启动浏览器，并注入匹配时区 TZ 与 en-US 语言
         let forwarder_port = forwarder_lease.port();
+        let tz_iana = map_country_to_iana_timezone(exit_country_code);
         let args = build_hardened_browser_args(&profile_dir, forwarder_port);
         let mut cmd = Command::new(&detected.path);
         cmd.args(&args)
+            .env("TZ", tz_iana)
+            .env("LANG", "en_US.UTF-8")
+            .env("LANGUAGE", "en-US")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -913,11 +1000,13 @@ impl BrowserLauncher {
         self.logger.info(
             LogKind::Launch,
             format!(
-                "已启动安全浏览器: {} ({:?}) | 初始PID={} | 代理={} | 本地转发端口=127.0.0.1:{}",
+                "已启动安全浏览器: {} ({:?}) | 初始PID={} | 代理={} | 环境={} | 时区TZ={} | 语言=en-US | 本地转发端口=127.0.0.1:{}",
                 detected.kind.display_name(),
                 detected.path,
                 root_pid,
                 proxy_name,
+                env_name,
+                tz_iana,
                 forwarder_port
             ),
         );
@@ -928,6 +1017,7 @@ impl BrowserLauncher {
                 session_id,
                 proxy_id,
                 proxy_name,
+                env_id,
                 browser: detected.clone(),
                 profile_dir: profile_dir.clone(),
                 sandbox,
