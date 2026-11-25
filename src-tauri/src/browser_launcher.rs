@@ -744,6 +744,7 @@ pub fn build_hardened_browser_args(profile_dir: &Path, forwarder_port: u16) -> V
         OsString::from("--disable-quic"),
         OsString::from("--force-webrtc-ip-handling-policy=disable_non_proxied_udp"),
         OsString::from("--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1"),
+        OsString::from("--test-type"),
         OsString::from(CLAUDE_WEB_URL),
     ]
 }

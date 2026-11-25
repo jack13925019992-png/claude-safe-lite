@@ -254,6 +254,7 @@ fn test_browser_detection_priority_and_hardened_cli_args() {
     assert!(args.contains(&"--disable-quic".to_string()));
     assert!(args.contains(&"--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_string()));
     assert!(args.contains(&"--host-resolver-rules=MAP * ~NOTFOUND , EXCLUDE 127.0.0.1".to_string()));
+    assert!(args.contains(&"--test-type".to_string()));
     assert!(args.contains(&"https://claude.ai".to_string()));
 
     let _ = fs::remove_dir_all(&dir);
