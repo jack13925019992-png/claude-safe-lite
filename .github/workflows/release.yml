@@ -1,0 +1,300 @@
+name: Build & Release Client (Windows & macOS)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# 赋予默认 GITHUB_TOKEN 自动创建/更新 Release 与上传双端安装包的权限
+permissions:
+  contents: write
+
+# 按提交 SHA 去重并发：当推送 main 后紧接着推送同一提交的 v* 标签时，自动取消重复构建并直接产出正式版 Release
+concurrency:
+  group: release-${{ github.sha }}
+  cancel-in-progress: true
+
+jobs:
+  # ==========================================================================
+  # 1. Windows 客户端云端打包 (x64 Setup 安装版 + MSI + 单文件免安装绿色版)
+  # ==========================================================================
+  build-windows:
+    name: Build Windows x64 (.exe & .msi)
+    runs-on: windows-latest
+
+    steps:
+      - name: 1. 检出客户端源码
+        uses: actions/checkout@v4
+
+      - name: 2. 安全门禁自检（拦截发卡器与私钥）
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          foreach ($dir in @("admin-license-issuer", "cloud-license-worker", "release-portable")) {
+            if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+          }
+          $leaked = Get-ChildItem -Recurse -File -Force | Where-Object {
+            $_.FullName -notmatch '\\(\.git|node_modules)\\' -and (
+              $_.Name -eq 'issuer-config.json' -or
+              $_.Name -like '*授权码分发器*' -or
+              $_.Extension -in @('.pem', '.key', '.p8', '.p12', '.pfx') -or
+              $_.Name -match '(private.*key|secret.*key|ed25519.*seed)'
+            )
+          }
+          if ($leaked) {
+            Write-Error "安全门禁拦截：检测到敏感私钥或发卡器文件！`n$($leaked.FullName -join "`n")"
+            exit 1
+          }
+          Write-Host "✓ Windows 安全门禁检查通过。"
+
+      - name: 3. 配置 Node.js 20 与 npm 依赖缓存
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: 4. 配置 Rust 工具链 (x86_64-pc-windows-msvc)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: 5. 启用 Rust 编译缓存
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - name: 6. 安装前端与 Tauri CLI 依赖
+        run: npm ci
+
+      - name: 7. 运行 Windows 核心安全自测
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test stage1_foundation
+
+      - name: 8. 编译并打包 Windows 安装包与单文件绿色版
+        run: npx tauri build --bundles nsis,msi
+
+      - name: 9. 整理重命名 Windows 安装产物
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $cfg = Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
+          $ver = $cfg.version
+          New-Item -ItemType Directory -Force -Path "dist-artifacts" | Out-Null
+
+          # 1) NSIS 一键向导安装版（推荐普通用户）
+          $nsisExe = Get-ChildItem "src-tauri/target/release/bundle/nsis/*setup*.exe" | Select-Object -First 1
+          if (-not $nsisExe) { Write-Error "未找到 NSIS 安装包！"; exit 1 }
+          Copy-Item $nsisExe.FullName "dist-artifacts/Claude-Safe-Lite_v${ver}_Windows_x64_Setup.exe"
+
+          # 2) 标准 MSI 安装包
+          $msiPkg = Get-ChildItem "src-tauri/target/release/bundle/msi/*.msi" | Select-Object -First 1
+          if ($msiPkg) {
+            Copy-Item $msiPkg.FullName "dist-artifacts/Claude-Safe-Lite_v${ver}_Windows_x64_Installer.msi"
+          }
+
+          # 3) 免安装单文件绿色版（MSVC 静态链接 WebView2Loader，双击即用）
+          $portableExe = "src-tauri/target/release/claude-safe-lite.exe"
+          if (-not (Test-Path $portableExe)) { Write-Error "未找到主程序 EXE！"; exit 1 }
+          Copy-Item $portableExe "dist-artifacts/Claude-Safe-Lite_v${ver}_Windows_x64_Portable.exe"
+
+          Get-ChildItem "dist-artifacts" | Select-Object Name, Length
+
+      - name: 10. 上传 Windows 构建产物至工作流暂存区
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-bundles
+          path: dist-artifacts/*
+          if-no-files-found: error
+
+  # ==========================================================================
+  # 2. macOS 客户端云端打包 (Apple Silicon M系列芯片 + Intel 双架构通用 .dmg)
+  # ==========================================================================
+  build-macos:
+    name: Build macOS Universal (.dmg)
+    runs-on: macos-latest
+
+    steps:
+      - name: 1. 检出客户端源码
+        uses: actions/checkout@v4
+
+      - name: 2. 安全门禁自检（拦截发卡器与私钥）
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf admin-license-issuer cloud-license-worker release-portable
+          LEAKED_FILES=$(find . \
+            -not -path './.git/*' \
+            -not -path './node_modules/*' \
+            \( \
+              -iname 'issuer-config.json' -o \
+              -iname '*授权码分发器*' -o \
+              -iname '*.pem' -o \
+              -iname '*.key' -o \
+              -iname '*.p8' -o \
+              -iname '*.p12' -o \
+              -iname '*.pfx' -o \
+              -iname '*private*key*' -o \
+              -iname '*secret*key*' -o \
+              -iname '*ed25519*seed*' \
+            \) || true)
+          if [ -n "$LEAKED_FILES" ]; then
+            echo "::error::安全门禁拦截：检测到敏感私钥或发卡器文件！"
+            echo "$LEAKED_FILES"
+            exit 1
+          fi
+          echo "✓ macOS 安全门禁检查通过。"
+
+      - name: 3. 配置 Node.js 20 与 npm 依赖缓存
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: 4. 配置 Rust 工具链（同时挂载 Apple Silicon ARM64 与 Intel x86_64 目标）
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: 5. 启用 Rust 编译缓存
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      - name: 6. 安装前端与 Tauri CLI 依赖
+        run: npm ci
+
+      - name: 7. 校验 macOS 标准 .icns 图标
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f "src-tauri/icons/icon.icns" ]; then
+            npx tauri icon src-tauri/icons/128x128.png
+          fi
+
+      - name: 8. 运行 macOS 跨平台核心安全自测
+        run: cargo test --manifest-path src-tauri/Cargo.toml --tests
+
+      - name: 9. 编译并打包 macOS 双架构通用 .dmg (Apple Silicon + Intel 二合一)
+        env:
+          # 执行 macOS Ad-hoc 签名，防止 Apple Silicon (M1~M4) 因二进制未签名报错“已损坏”
+          APPLE_SIGNING_IDENTITY: "-"
+        run: npx tauri build --target universal-apple-darwin --bundles dmg
+
+      - name: 10. 校验 Universal 双架构指令集并整理 .dmg
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+
+          UNI_BIN="src-tauri/target/universal-apple-darwin/release/claude-safe-lite"
+          ARCHS=$(lipo -archs "$UNI_BIN")
+          echo "检测到 macOS 二进制架构: $ARCHS"
+          if [[ "$ARCHS" != *"x86_64"* ]] || [[ "$ARCHS" != *"arm64"* ]]; then
+            echo "::error::双架构校验失败！当前仅包含: $ARCHS"
+            exit 1
+          fi
+
+          RAW_DMG=$(find src-tauri/target/universal-apple-darwin/release/bundle/dmg -maxdepth 1 -name "*.dmg" | head -n 1)
+          if [ -z "$RAW_DMG" ] || [ ! -f "$RAW_DMG" ]; then
+            echo "::error::未找到生成的 .dmg 安装包！"
+            exit 1
+          fi
+
+          mkdir -p dist-artifacts
+          cp "$RAW_DMG" "dist-artifacts/Claude-Safe-Lite_v${VERSION}_macOS_Universal.dmg"
+          ls -lh dist-artifacts/
+
+      - name: 11. 上传 macOS 构建产物至工作流暂存区
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-bundles
+          path: dist-artifacts/*
+          if-no-files-found: error
+
+  # ==========================================================================
+  # 3. 汇聚 Windows 与 macOS 全部安装包，原子发布到 GitHub Releases 页面
+  # ==========================================================================
+  publish-release:
+    name: Publish Dual-Platform GitHub Release
+    needs:
+      - build-windows
+      - build-macos
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 1. 检出版本元数据
+        uses: actions/checkout@v4
+
+      - name: 2. 下载双端构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: 3. 生成双端安装包校验清单与版本信息
+        id: meta
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG_NAME="${GITHUB_REF_NAME}"
+            RELEASE_TITLE="Claude Safe Lite ${TAG_NAME} (Windows & macOS)"
+          else
+            TAG_NAME="latest"
+            RELEASE_TITLE="Claude Safe Lite 最新自动构建版 (v${VERSION} · Windows & macOS)"
+          fi
+
+          echo "tag_name=${TAG_NAME}" >> "$GITHUB_OUTPUT"
+          echo "release_title=${RELEASE_TITLE}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "checksums<<EOF"
+            cd release-assets
+            for f in *; do
+              sum=$(sha256sum "$f" | awk '{print $1}')
+              size=$(du -h "$f" | awk '{print $1}')
+              echo "| \`$f\` | $size | \`$sum\` |"
+            done
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 4. 自动发布双端安装包到 GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.meta.outputs.tag_name }}
+          name: ${{ steps.meta.outputs.release_title }}
+          prerelease: false
+          make_latest: "true"
+          files: release-assets/*
+          body: |
+            ### 🛡️ Claude Safe Lite 双平台客户端下载（Windows & macOS）
+
+            #### 一、安装包选型指南
+            - **💻 Windows 用户（推荐安装版）**：下载 `*_Windows_x64_Setup.exe`（向导安装并自动生成桌面快捷方式）；或下载 `*_Windows_x64_Portable.exe`（单文件免安装绿色版，双击即用）。
+            - **🍎 macOS 用户（M 芯片 / Intel 通用）**：下载 `*_macOS_Universal.dmg`（双架构二合一安装包，同时原生支持 Apple Silicon M1~M4 与 Intel 芯片）。
+
+            #### 二、文件大小与 SHA-256 完整性校验
+            | 安装包文件名 | 大小 | SHA-256 校验值 |
+            | :--- | :--- | :--- |
+            ${{ steps.meta.outputs.checksums }}
+
+            ---
+
+            #### 三、首次安装解除系统拦截说明
+
+            **💻 Windows 首次打开提示「Windows 已保护你的电脑」时：**
+            1. 在蓝色拦截弹窗中点击左上角的 **【更多信息】** 文字链接；
+            2. 点击底部新出现的 **【仍要运行】** 按钮即可正常安装或启动（仅首次需要）。
+
+            **🍎 macOS 首次打开提示「无法验证开发者 / 已损坏」时：**
+            1. 双击 `.dmg`，将 **Claude Safe Lite** 拖入右侧 **Applications（应用程序）** 文件夹；
+            2. 首次打开若弹窗拦截：先点 **【完成/取消】** 关闭弹窗 → 打开 **【系统设置】→【隐私与安全性】** → 拉到底部点击 **【仍要打开】** 并验证密码即可；
+            3. 如遇个别系统提示“已损坏，无法打开”，打开 **【终端 (Terminal)】** 执行以下一行命令回车即可放行：
+               ```bash
+               sudo xattr -rd com.apple.quarantine "/Applications/Claude Safe Lite.app"
+               ```

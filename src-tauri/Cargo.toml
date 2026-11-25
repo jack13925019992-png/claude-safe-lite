@@ -1,0 +1,65 @@
+[package]
+name = "claude-safe-lite"
+version = "2.0.0"
+description = "Claude Safe Lite v2 - 跨平台安全代理转发与防泄露浏览器启动器 (Windows & macOS)"
+authors = ["Claude Safe Lite Team"]
+edition = "2021"
+
+[lib]
+name = "claude_safe_lite_lib"
+# 红线配置：严禁删除 cdylib
+crate-type = ["staticlib", "cdylib", "rlib"]
+test = false
+
+[[bin]]
+name = "claude-safe-lite"
+path = "src/main.rs"
+test = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "socks"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+base64 = "0.22"
+ring = "0.17"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "7"
+thiserror = "2"
+anyhow = "1"
+url = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Security_Cryptography",
+  "Win32_System_JobObjects",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
+  "Win32_System_Registry",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_Threading",
+  "Win32_Storage_FileSystem",
+  "Win32_UI_Controls_Dialogs",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# 红线配置：严禁修改 lto = "thin" 与 codegen-units = 4（严禁改回 fat LTO）
+[profile.release]
+lto = "thin"
+codegen-units = 4
+panic = "abort"
+strip = true

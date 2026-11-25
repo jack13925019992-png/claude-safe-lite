@@ -1,0 +1,73 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Frontend build output
+dist/
+
+# Rust / Tauri build & local release staging output
+src-tauri/target/
+src-tauri/gen/
+release-portable/
+release-dmg/
+release-win/
+release-assets/
+dist-artifacts/
+*.exe
+*.msi
+*.dmg
+*.app/
+
+# ============================================================================
+# 安全红线：严禁提交管理员发卡器、云端核销后台及任何私钥/敏感配置文件
+# ============================================================================
+admin-license-issuer/
+**/admin-license-issuer/
+issuer-config.json
+**/issuer-config.json
+issuer-running.port
+**/issuer-running.port
+*授权码分发器*
+
+# 云端授权 Worker 服务端目录与本地调试凭据（仅上传纯客户端代码，物理隔离服务端）
+cloud-license-worker/
+**/cloud-license-worker/
+.wrangler/
+.dev.vars
+.dev.vars.*
+
+# 私钥、证书、签名种子与环境变量文件
+*.pem
+*.key
+*.p8
+*.p12
+*.pfx
+*.der
+*.cer
+*.crt
+*.jks
+*.keystore
+*private*key*
+*secret*key*
+*ed25519*seed*
+.env
+.env.*
+!.env.example
+
+# Build & runtime logs
+build-logs/
+*.log
+*.bak
+*.tmp
+
+# OS / IDE caches
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+.vscode/
+.idea/
