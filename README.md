@@ -67,18 +67,18 @@
 
 ## 四、开发者维护与云端自动打包说明
 
-本项目已配置 GitHub Actions 双端自动构建流水线（[`.github/workflows/release.yml`](.github/workflows/release.yml)），推送代码或版本标签后会在云端并行构建 Windows 与 macOS 安装包并发布至 GitHub Releases：
+本项目已配置 GitHub Actions 双端自动构建流水线（[`.github/workflows/release.yml`](.github/workflows/release.yml)）。为避免日常普通提交与版本标签重复触发、节省构建配额，**仅在推送 `v*` 版本标签（或网页端手动点击 `Run workflow`）时执行完整双端打包并自动发布至 GitHub Releases**：
 
-- **日常更新客户端（自动覆盖更新 `latest` 构建版）**：
-  ```powershell
-  git add .
-  git commit -m "update: 优化客户端体验"
-  git push
-  ```
-- **发布正式版本号（自动创建独立版本 Release 页面，如 `v2.0.1`）**：
-  ```powershell
-  git tag v2.0.1
-  git push origin v2.0.1
-  ```
+1. **平时保存并推送代码到主分支（不消耗打包配额）**：
+   ```powershell
+   git add .
+   git commit -m "update: 优化客户端体验"
+   git push origin main
+   ```
+2. **需要打包发布新版本时（打上 `v*` 标签推送，自动编译 Windows + macOS 并发布 Release）**：
+   ```powershell
+   git tag v2.0.1
+   git push origin v2.0.1
+   ```
 
 更多详细发版步骤与架构文档请参阅 [`docs/`](docs/) 目录。

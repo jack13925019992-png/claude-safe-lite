@@ -9,7 +9,7 @@ REM ============================================================================
 cd /d "%~dp0"
 
 REM 1. Lock toolchain PATH (MinGW64 + Cargo + Node)
-set "MINGW_BIN=C:\Users\Jack\msys64\mingw64\bin"
+set "MINGW_BIN=%USERPROFILE%\msys64\mingw64\bin"
 if exist "C:\msys64\mingw64\bin\gcc.exe" (
     if not exist "%MINGW_BIN%\gcc.exe" set "MINGW_BIN=C:\msys64\mingw64\bin"
 )

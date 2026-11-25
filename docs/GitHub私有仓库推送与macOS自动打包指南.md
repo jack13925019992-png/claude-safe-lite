@@ -15,7 +15,7 @@
    git add .
    git commit -m "update: 更新客户端功能"
    ```
-2. **推送代码并打正式版本标签**（将 `v2.0.1` 替换为新版本号；若仅日常测试只执行 `git push` 即可自动更新 `latest` Release）：
+2. **推送代码并打上 `v*` 正式版本标签触发云端打包**（将 `v2.0.1` 替换为新版本号；注：仅 `git push origin main` 只保存代码不触发打包，推送 `v*` 标签或网页点击 `Run workflow` 才会触发完整双端编译与 Release 发布，避免重复计费）：
    ```powershell
    git push origin main
    git tag v2.0.1
